@@ -1,0 +1,203 @@
+
+/----------------------------------
+
+12.  Банкомат
+Имеется банкомат с N терминалами. В банке M клиентов. В банкомате находится S рублей.
+Клиент подходит к свободному терминалу, вводит свой id (1..М) и пароль, если ввод неправильный,
+то у него есть еще 2 попытки, после чего он блокируется. Разблокируется клиент через 10 минут времени.
+После входа клиент может снять деньги со своего счета, но не более 10 рублей за один раз.
+Если денег в банкомате не хватает, то в операции клиенту отказывается. В таком случае, он приходит через 10 минут
+В банкомат раз в 20 минут приезжают инкассаторы и привозят деньги.
+
+Проверяемые свойства:
+Заблокированный клиент не может войти в основное меню
+Невозможно войти в основное меню, не введя правильную комбинацию ID-пароль
+Заблокированный клиент в конце концов сможет войти в систему
+Клиент не может снять больше, чем у него есть на счету
+Одновременно в банкомат может успешно войти только один клиент с одинаковыми ID.
+Клиент, которому не выдали деньги,  в конце концов их получит.
+
+Решение:
+клиент - поток
+банкомат - семафор на N потоков
+----------------------------------/
+
+/----------------------------
+------ Client ---------
+----------------------------/
+MODULE Client(id, account_init, clk, max_clk, wrong_period, atm)
+DEFINE
+	SALARY_PERIOD := 20;
+	SALARY_SUM := 5;
+VAR
+	state : {SLEEP, QUEUE_START, IN_SERVICE, WRONG_PASSWORD_1, WRONG_PASSWORD_2, MAIN_MENU, WITHDRAW_ACCEPTED, WITHDRAW_DECLINED};
+	block_sleep_ctr : 0 .. atm.MAX_BLOCK_TIME;
+	withdraw : 0 .. atm.MAX_WITHDRAW;
+
+	queue_start_time : 0 .. max_clk - 1;
+
+	account: 0 .. atm.MAX_CLIENT_ACCOUNT;
+
+ASSIGN
+	init(state) := SLEEP;
+	next(state) :=
+		case
+			state = SLEEP & (block_sleep_ctr = 0	| block_sleep_ctr = atm.MAX_BLOCK_TIME)																: QUEUE_START;
+			state = SLEEP																																																: SLEEP;
+			state = QUEUE_START	& atm.transaction_available_id = id																											: IN_SERVICE;
+			state = QUEUE_START																																													: QUEUE_START;
+			state = IN_SERVICE & (clk mod wrong_period) = 0   																													: WRONG_PASSWORD_1;
+			state = WRONG_PASSWORD_1 & (clk mod wrong_period) = 0																												: WRONG_PASSWORD_2;
+			state = WRONG_PASSWORD_2 & (clk mod wrong_period) = 0																												: SLEEP;
+			state = IN_SERVICE & atm.free_terminals > 0																																 	: MAIN_MENU;
+			state = IN_SERVICE & atm.free_terminals = 0																																 	: IN_SERVICE;
+			state = MAIN_MENU & withdraw <= account & withdraw <= atm.account & atm.transaction_available_id = id	 			: WITHDRAW_ACCEPTED;
+			state = MAIN_MENU & (withdraw > account | withdraw > atm.account | atm.transaction_available_id != id) 			: WITHDRAW_DECLINED;
+			state = WITHDRAW_DECLINED																																										: MAIN_MENU;
+			state = WITHDRAW_ACCEPTED																																							 			: SLEEP;
+			TRUE 																																																	 			: SLEEP;
+		esac;
+
+	init(block_sleep_ctr) := 0;
+	next(block_sleep_ctr):=
+		case
+			state = SLEEP & block_sleep_ctr = 0			: atm.MAX_BLOCK_TIME;
+			state = SLEEP														: (block_sleep_ctr - 1);
+			state = SLEEP & block_sleep_ctr = 0			: atm.MAX_BLOCK_TIME;
+			state = SLEEP														: (block_sleep_ctr - 1);
+			TRUE																		: block_sleep_ctr;
+		esac;
+
+	next(withdraw) :=
+		case
+			state = QUEUE_START						 	: clk mod atm.MAX_WITHDRAW;
+			TRUE														: 0;
+		esac;
+
+	init(queue_start_time) := 0;
+	next(queue_start_time) :=
+		case
+		 state = QUEUE_START 	: clk;
+		 TRUE									: queue_start_time;
+		esac;
+
+
+	init(account) := account_init;
+	next(account) :=
+		case
+			state = WITHDRAW_ACCEPTED & withdraw <= account   																									: (account - withdraw);
+			state = SLEEP & ((clk mod SALARY_PERIOD) = 0) & ((account + SALARY_SUM) < atm.MAX_CLIENT_ACCOUNT)		: (account + SALARY_SUM);
+			TRUE 																																																: account;
+		esac;
+
+
+MODULE ATM(clk, client_1, client_2)
+	DEFINE
+	--COMMON SYSTEM PARAMS
+		TERMINALS_NUM := 3;
+		MAX_WITHDRAW := 10;
+		MAX_ATTEMPTS := 3;
+		MAX_BLOCK_TIME := 10;
+
+		MAX_CLIENT_ACCOUNT := 30;
+
+		INIT_ATM_ACCOUNT := 100;
+		MAX_ATM_ACCOUNT := 150;
+
+		ATM_ADD_FREQ := 12;
+		ATM_ADD_SUM := 20;
+	VAR
+		account : 0 .. MAX_ATM_ACCOUNT;
+		free_terminals : 0 .. TERMINALS_NUM;
+
+		transaction_available_id : {1, 2};
+
+	ASSIGN
+
+		--collector
+		init(account) := INIT_ATM_ACCOUNT;
+		next(account) :=
+			case
+				(clk mod ATM_ADD_FREQ) = 0 & (account + ATM_ADD_SUM) < MAX_ATM_ACCOUNT : (account + ATM_ADD_SUM);
+				TRUE: account;
+			esac;
+
+		--free_terminals
+		init(free_terminals) := TERMINALS_NUM;
+		next(free_terminals) :=
+			case
+				client_1.state = SLEEP  & client_2.state = SLEEP 						: 3;
+				client_1.state = SLEEP  & client_2.state != SLEEP 					: 2;
+				client_2.state = SLEEP  & client_1.state != SLEEP 					: 2;
+				client_2.state != SLEEP  & client_1.state != SLEEP 					: 1;
+				TRUE																												: 3;
+			esac;
+
+		next(transaction_available_id) :=
+			case
+				client_1.state = QUEUE_START & client_2.state = QUEUE_START & client_1.queue_start_time	< client_2.queue_start_time		: client_1.id;
+				client_1.state = MAIN_MENU & client_2.state = MAIN_MENU & client_1.queue_start_time	< client_2.queue_start_time				: client_1.id;
+
+				client_1.state != QUEUE_START & client_2.state = QUEUE_START											 																		: client_2.id;
+				client_1.state != MAIN_MENU & client_2.state = MAIN_MENU											 																				: client_2.id;
+
+				client_2.state != QUEUE_START & client_1.state = QUEUE_START											 																		: client_1.id;
+				client_2.state != MAIN_MENU & client_1.state = MAIN_MENU											 																				: client_1.id;
+
+				TRUE																																																									: client_1.id;
+			esac;
+
+----------------------------
+--------- MAIN -------------
+----------------------------
+MODULE main ()
+	DEFINE
+		CLIENT_1_ACCOUNT_INIT := 25;
+		CLIENT_2_ACCOUNT_INIT := 30;
+		CLIENT_1_WRONG_PERIOD := 3;
+		CLIENT_2_WRONG_PERIOD := 5;
+		MAX_CLK := 21;
+	VAR
+		clk : 0 .. MAX_CLK - 1;
+
+		atm : ATM(clk, client_1, client_2);
+		client_1 : Client(1, CLIENT_1_ACCOUNT_INIT, clk, MAX_CLK, CLIENT_1_WRONG_PERIOD, atm);
+		client_2 : Client(1, CLIENT_2_ACCOUNT_INIT, clk, MAX_CLK, CLIENT_2_WRONG_PERIOD, atm);
+
+	ASSIGN
+
+		--clk
+		init(clk) := 1;
+		next(clk) :=
+			case
+				TRUE: (clk + 1) mod MAX_CLK;
+			esac;
+
+
+	-- Заблокированный клиент не может войти в основное меню на следующем шаге
+	-- LTLSPEC G (client_1.state = SLEEP -> X client_1.state != MAIN_MENU) --PASSED
+	-- LTLSPEC G (client_2.state = SLEEP -> X client_2.state != MAIN_MENU) --PASSED
+
+	-- Невозможно войти в основное меню, не введя правильную комбинацию ID-пароль
+	-- LTLSPEC G ((clk mod CLIENT_1_WRONG_PERIOD = 0) -> X !(client_1.state = MAIN_MENU)) --FAILED
+	-- LTLSPEC G ((clk mod CLIENT_2_WRONG_PERIOD = 0) -> X client_2.state != MAIN_MENU) --PASSED
+
+	-- Заблокированный клиент в конце концов сможет войти в систему
+	-- LTLSPEC G (client_1.state = SLEEP -> F client_1.state = MAIN_MENU) --PASSED
+	-- LTLSPEC G (client_2.state = SLEEP -> F client_2.state = MAIN_MENU) --PASSED
+
+	-- Клиент не может снять больше, чем у него есть на счету
+	-- LTLSPEC G !((client_1.withdraw > client_1.account) & (client_1.state = WITHDRAW_ACCEPTED)) --PASSED
+	-- LTLSPEC G !((client_2.withdraw > client_2.account) & (client_2.state = WITHDRAW_ACCEPTED)) --PASSED
+
+	-- Одновременно в банкомат может успешно войти только один клиент с одинаковыми ID
+	-- LTLSPEC G !(client_1.state = MAIN_MENU & client_2.state = MAIN_MENU 				& client_1.id = client_2.id
+						-- | client_1.state = MAIN_MENU & client_2.state = WITHDRAW_ACCEPTED & client_1.id = client_2.id
+						-- | client_1.state = MAIN_MENU & client_2.state = IN_SERVICE 				& client_1.id = client_2.id
+						-- | client_2.state = MAIN_MENU & client_1.state = WITHDRAW_ACCEPTED & client_1.id = client_2.id
+						-- | client_2.state = MAIN_MENU & client_1.state = IN_SERVICE 				& client_1.id = client_2.id
+		-- ) --FAILED
+
+	-- Клиент, которому не выдали деньги, в конце концов их получит
+	-- LTLSPEC G (client_1.state = WITHDRAW_DECLINED -> F client_1.state = WITHDRAW_ACCEPTED) --PASSED
+	-- LTLSPEC G (client_2.state = WITHDRAW_DECLINED -> F client_2.state = WITHDRAW_ACCEPTED) --PASSED
